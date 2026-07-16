@@ -86,6 +86,21 @@ install_docker() {
 }
 
 # ============================================================
+# Получение последней версии с GitHub
+# ============================================================
+get_latest_version() {
+    local REPO="remnawave/backend"
+    local LATEST=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    
+    if [[ -z "$LATEST" ]]; then
+        warn "Не удалось получить последнюю версию с GitHub, используем 2.8.0"
+        LATEST="2.8.0"
+    fi
+    
+    echo "$LATEST"
+}
+
+# ============================================================
 # Генерация секретных ключей
 # ============================================================
 generate_secrets() {
@@ -137,11 +152,16 @@ install_panel() {
     mkdir -p "$INSTALL_DIR"
     cd "$INSTALL_DIR"
     
+    # Получение последней версии
+    local LATEST_VER=$(get_latest_version)
+    ok "Последняя версия: ${GREEN}$LATEST_VER${CLR}"
+    
     info "Скачивание docker-compose.yml..."
     curl -fsSL -o docker-compose.yml \
         "https://raw.githubusercontent.com/remnawave/backend/main/docker-compose-prod.yml" 2>/dev/null
-    sed -i 's|remnawave/backend:2$|remnawave/backend:2.8.0|' docker-compose.yml
-    sed -i 's|remnawave/backend:2 |remnawave/backend:2.8.0 |' docker-compose.yml
+    sed -i "s|remnawave/backend:latest|remnawave/backend:$LATEST_VER|" docker-compose.yml
+    sed -i 's|remnawave/backend:2$|remnawave/backend:'"$LATEST_VER"'|' docker-compose.yml
+    sed -i 's|remnawave/backend:2 |remnawave/backend:'"$LATEST_VER"' |' docker-compose.yml
     
     info "Скачивание .env..."
     curl -fsSL -o .env \
@@ -654,8 +674,10 @@ restore_panel() {
         ok "Конфиг подписок восстановлен"
     fi
     
-    # Фикс версии backend
-    sed -i 's|remnawave/backend:latest|remnawave/backend:2.8.0|' "$INSTALL_DIR/docker-compose.yml"
+    # Получение последней версии и фикс
+    local LATEST_VER=$(get_latest_version)
+    sed -i "s|remnawave/backend:latest|remnawave/backend:$LATEST_VER|" "$INSTALL_DIR/docker-compose.yml"
+    sed -i 's|remnawave/backend:2$|remnawave/backend:'"$LATEST_VER"'|' "$INSTALL_DIR/docker-compose.yml"
     
     # Запуск только БД
     cd "$INSTALL_DIR"
