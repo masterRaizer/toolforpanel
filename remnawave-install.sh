@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
-#  Remnawave Panel 2.8.0 — One-Click Installer
-#  https://github.com/shashachkaaa/remnawave-scripts
+#  Remnawave Panel 2.8.0 + Node + Migration — All-in-One Installer
+#  https://github.com/masterRaizer/toolforpanel
 # ============================================================
 
 set -e
@@ -20,6 +20,7 @@ BOLD='\033[1m'
 INSTALL_DIR="/opt/remnawave"
 NGINX_DIR="$INSTALL_DIR/nginx"
 SUB_DIR="$INSTALL_DIR/subscription"
+NODE_DIR="/opt/remnanode"
 LOG_FILE="/var/log/remnawave-install.log"
 
 # Defaults
@@ -29,40 +30,40 @@ SUB_DOMAIN=""
 # ============================================================
 # Helpers
 # ============================================================
-log_init() {
-    mkdir -p "$(dirname "$LOG_FILE")"
-    touch "$LOG_FILE"
-    exec > >(tee -a "$LOG_FILE") 2>&1
-}
-
-info()    { echo -e "${BLUE}[•]${CLR} $1"; }
-ok()      { echo -e "${GREEN}[✓]${CLR} $1"; }
+info()    { echo -e "${BLUE}[*]${CLR} $1"; }
+ok()      { echo -e "${GREEN}[OK]${CLR} $1"; }
 warn()    { echo -e "${YELLOW}[!]${CLR} $1"; }
-err()     { echo -e "${RED}[✗]${CLR} $1"; }
-step()    { echo -e "\n${CYAN}▶${CLR} ${BOLD}$1${CLR}"; }
-banner()  { echo -e "${PURPLE}$1${CLR}"; }
-
-header() {
-    clear 2>/dev/null || true
-    echo ""
-    echo -e "${PURPLE}    ╔══════════════════════════════════════════════════════════╗${CLR}"
-    echo -e "${PURPLE}    ║                                                          ║${CLR}"
-    echo -e "${PURPLE}    ║        ██████  ███████ ███    ███ ███    ██              ║${CLR}"
-    echo -e "${PURPLE}    ║        ██   ██ ██      ████  ████ ████   ██              ║${CLR}"
-    echo -e "${PURPLE}    ║        ██████  █████   ██ ████ ██ ██ ██  ██              ║${CLR}"
-    echo -e "${PURPLE}    ║        ██   ██ ██      ██  ██  ██ ██  ██ ██              ║${CLR}"
-    echo -e "${PURPLE}    ║        ██   ██ ███████ ██      ██ ██   ████              ║${CLR}"
-    echo -e "${PURPLE}    ║                                                          ║${CLR}"
-    echo -e "${PURPLE}    ║              Panel 2.8.0 — One-Click Setup               ║${CLR}"
-    echo -e "${PURPLE}    ╚══════════════════════════════════════════════════════════╝${CLR}"
-    echo ""
-}
+err()     { echo -e "${RED}[ERROR]${CLR} $1"; }
+step()    { echo -e "\n${CYAN}==>${CLR} ${BOLD}$1${CLR}"; }
 
 require_root() {
     if [[ $EUID -ne 0 ]]; then
         err "This script must be run as root. Use: ${YELLOW}sudo su -${CLR}"
         exit 1
     fi
+}
+
+header() {
+    echo ""
+    echo -e "${PURPLE}    ╔══════════════════════════════════════════════════════════╗${CLR}"
+    echo -e "${PURPLE}    ║          Remnawave All-in-One Tool                       ║${CLR}"
+    echo -e "${PURPLE}    ║          Panel 2.8.0 + Node + Migration                  ║${CLR}"
+    echo -e "${PURPLE}    ╚══════════════════════════════════════════════════════════╝${CLR}"
+    echo ""
+}
+
+safe_apt_install() {
+    info "Installing packages: $@"
+    set +e
+    systemctl mask nginx.service &>/dev/null || true
+    dpkg --configure -a &>/dev/null || true
+    apt-get --fix-broken install -y -qq &>/dev/null || true
+    systemctl unmask nginx.service &>/dev/null || true
+    set -e
+    apt-get update -qq
+    for pkg in "$@"; do
+        apt-get install "$pkg" -y -qq
+    done
 }
 
 # ============================================================
@@ -99,49 +100,47 @@ generate_secrets() {
 # ============================================================
 ask_domains() {
     step "Domain Configuration"
-
     if [[ -z "$PANEL_DOMAIN" ]]; then
         read -rp "Enter panel domain (e.g., panel.example.com): " PANEL_DOMAIN
     fi
     if [[ -z "$SUB_DOMAIN" ]]; then
         read -rp "Enter subscription domain (e.g., sub.example.com): " SUB_DOMAIN
     fi
-
     ok "Panel domain:    ${GREEN}$PANEL_DOMAIN${CLR}"
     ok "Sub domain:      ${GREEN}$SUB_DOMAIN${CLR}"
 }
 
 # ============================================================
-# Download configs
+# INSTALL PANEL
 # ============================================================
-download_configs() {
+install_panel() {
+    header
+    require_root
+    log_init 2>/dev/null || true
+    
+    if [[ -d "$INSTALL_DIR" ]] && docker ps --format '{{.Names}}' | grep -q "remnawave"; then
+        warn "Remnawave appears to be already installed!"
+        read -rp "Continue and overwrite? [y/N]: " overwrite
+        [[ "$overwrite" =~ ^[Yy]$ ]] || { return; }
+    fi
+    
+    ask_domains
+    install_docker
+    generate_secrets
+    
     step "Downloading configuration files"
     mkdir -p "$INSTALL_DIR"
     cd "$INSTALL_DIR"
-
-    info "Fetching docker-compose.yml (backend:2.8.0)..."
+    
     curl -fsSL -o docker-compose.yml \
         "https://raw.githubusercontent.com/remnawave/backend/main/docker-compose-prod.yml" 2>/dev/null
-
-    # Pin to 2.8.0
     sed -i 's|remnawave/backend:2$|remnawave/backend:2.8.0|' docker-compose.yml
     sed -i 's|remnawave/backend:2 |remnawave/backend:2.8.0 |' docker-compose.yml
-
-    info "Fetching .env.sample..."
+    
     curl -fsSL -o .env \
         "https://raw.githubusercontent.com/remnawave/backend/main/.env.sample" 2>/dev/null
-
-    ok "Configuration files downloaded"
-}
-
-# ============================================================
-# Configure .env
-# ============================================================
-configure_env() {
+    
     step "Configuring environment"
-    cd "$INSTALL_DIR"
-
-    # Apply secrets
     sed -i "s|^JWT_AUTH_SECRET=.*|JWT_AUTH_SECRET=$JWT_AUTH_SECRET|" .env
     sed -i "s|^JWT_API_TOKENS_SECRET=.*|JWT_API_TOKENS_SECRET=$JWT_API_TOKENS_SECRET|" .env
     sed -i "s|^#\?APP_SECRET=.*|APP_SECRET=$APP_SECRET|" .env
@@ -149,115 +148,105 @@ configure_env() {
     sed -i "s|^WEBHOOK_SECRET_HEADER=.*|WEBHOOK_SECRET_HEADER=$WEBHOOK_SECRET|" .env
     sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$POSTGRES_PASSWORD|" .env
     sed -i "s|postgresql://postgres:[^@]*@|postgresql://postgres:$POSTGRES_PASSWORD@|" .env
-
-    # Domains
     sed -i "s|^FRONT_END_DOMAIN=.*|FRONT_END_DOMAIN=$PANEL_DOMAIN|" .env
     sed -i "s|^SUB_PUBLIC_DOMAIN=.*|SUB_PUBLIC_DOMAIN=$SUB_DOMAIN|" .env
     sed -i "s|^PANEL_DOMAIN=.*|PANEL_DOMAIN=$PANEL_DOMAIN|" .env
-
-    # Disable Telegram by default
     sed -i "s|^IS_TELEGRAM_NOTIFICATIONS_ENABLED=.*|IS_TELEGRAM_NOTIFICATIONS_ENABLED=false|" .env
-
-    ok ".env configured"
-}
-
-# ============================================================
-# Start panel
-# ============================================================
-start_panel() {
+    
     step "Starting Remnawave Panel 2.8.0"
-    cd "$INSTALL_DIR"
     docker compose up -d
-
-    info "Waiting for services to become healthy..."
+    
+    info "Waiting for services..."
     for i in {1..60}; do
         if curl -fs http://127.0.0.1:3001/health &>/dev/null; then
-            ok "Panel is healthy and running"
-            return 0
+            ok "Panel is healthy!"
+            break
         fi
         sleep 1
-        echo -n "."
     done
-    echo ""
-    warn "Health check timed out. Check logs: docker compose logs -f"
+    
+    # Nginx + SSL
+    setup_nginx
+    
+    # Subscription Page
+    setup_subscription
+    
+    # Save credentials
+    save_credentials
+    show_summary
 }
 
 # ============================================================
-# Nginx + SSL
+# NGINX + SSL
 # ============================================================
 setup_nginx() {
-    step "Setting up Nginx reverse proxy with SSL"
-
+    step "Setting up Nginx with SSL"
     mkdir -p "$NGINX_DIR"
     cd "$NGINX_DIR"
-
-    # Dependencies
-    info "Installing dependencies (cron, socat)..."
-    apt-get update -qq >/dev/null 2>&1
-    apt-get install -y -qq cron socat >/dev/null 2>&1
-
-    # acme.sh
+    
+    apt-get install -y -qq cron socat
+    
     if [[ ! -d "$HOME/.acme.sh" ]]; then
-        info "Installing acme.sh..."
         curl https://get.acme.sh | sh -s email="admin@$PANEL_DOMAIN" >/dev/null 2>&1
     fi
     export PATH="$HOME/.acme.sh:$PATH"
-
-    # Issue SSL
-    info "Requesting SSL certificate for $PANEL_DOMAIN..."
+    
     acme.sh --issue --standalone -d "$PANEL_DOMAIN" \
         --key-file "$NGINX_DIR/privkey.pem" \
         --fullchain-file "$NGINX_DIR/fullchain.pem" \
         --alpn --tlsport 8443
-
-    acme.sh --install-cert -d "$PANEL_DOMAIN" \
-        --key-file "$NGINX_DIR/privkey.pem" \
-        --fullchain-file "$NGINX_DIR/fullchain.pem" \
-        --reloadcmd "docker exec remnawave-nginx nginx -s reload 2>/dev/null || true"
-
-    # nginx.conf
+    
+    if [[ "$SUB_DOMAIN" != "$PANEL_DOMAIN" ]]; then
+        acme.sh --issue --standalone -d "$SUB_DOMAIN" \
+            --key-file "$NGINX_DIR/privkey-sub.pem" \
+            --fullchain-file "$NGINX_DIR/fullchain-sub.pem" \
+            --alpn --tlsport 8443
+    fi
+    
+    # Get container IPs
+    REMNAWAVE_IP=$(docker network inspect remnawave-network --format "{{range .Containers}}{{if eq .Name \"remnawave\"}}{{.IPv4Address}}{{end}}{{end}}" | cut -d/ -f1)
+    SUB_IP=$(docker network inspect remnawave-network --format "{{range .Containers}}{{if eq .Name \"remnawave-subscription-page\"}}{{.IPv4Address}}{{end}}{{end}}" | cut -d/ -f1)
+    
     cat > "$NGINX_DIR/nginx.conf" << EOF
 server {
     listen 443 ssl http2;
-    listen [::]:443 ssl http2;
     server_name ${PANEL_DOMAIN};
-
     location / {
         proxy_http_version 1.1;
-        proxy_pass http://remnawave:3000;
+        proxy_pass http://${REMNAWAVE_IP}:3000;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_redirect off;
     }
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305;
-    ssl_session_timeout 1d;
-    ssl_session_cache shared:MozSSL:10m;
-    ssl_session_tickets off;
     ssl_certificate "/etc/nginx/ssl/fullchain.pem";
     ssl_certificate_key "/etc/nginx/ssl/privkey.pem";
-    ssl_trusted_certificate "/etc/nginx/ssl/fullchain.pem";
-    ssl_stapling on;
-    ssl_stapling_verify on;
-    resolver 1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 valid=60s;
-    resolver_timeout 2s;
-
-    gzip on; gzip_vary on; gzip_proxied any; gzip_comp_level 6;
-    gzip_min_length 256;
-    gzip_types application/json application/javascript text/css text/plain text/xml;
-}
-
-server {
-    listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
-    server_name _;
-    ssl_reject_handshake on;
 }
 EOF
-
-    # docker-compose for nginx
+    
+    if [[ "$SUB_DOMAIN" != "$PANEL_DOMAIN" && -n "$SUB_IP" ]]; then
+        cat >> "$NGINX_DIR/nginx.conf" << EOF
+server {
+    listen 443 ssl http2;
+    server_name ${SUB_DOMAIN};
+    location / {
+        proxy_http_version 1.1;
+        proxy_pass http://${SUB_IP}:3010;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_redirect off;
+    }
+    ssl_certificate "/etc/nginx/ssl-sub/fullchain.pem";
+    ssl_certificate_key "/etc/nginx/ssl-sub/privkey.pem";
+}
+EOF
+    fi
+    
+    cat >> "$NGINX_DIR/nginx.conf" << EOF
+server { listen 443 ssl default_server; server_name _; ssl_reject_handshake on; }
+EOF
+    
     cat > "$NGINX_DIR/docker-compose.yml" << EOF
 services:
   remnawave-nginx:
@@ -267,9 +256,19 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
       - ./privkey.pem:/etc/nginx/ssl/privkey.pem:ro
+EOF
+    
+    if [[ "$SUB_DOMAIN" != "$PANEL_DOMAIN" ]]; then
+        cat >> "$NGINX_DIR/docker-compose.yml" << EOF
+      - ./fullchain-sub.pem:/etc/nginx/ssl-sub/fullchain.pem:ro
+      - ./privkey-sub.pem:/etc/nginx/ssl-sub/privkey.pem:ro
+EOF
+    fi
+    
+    cat >> "$NGINX_DIR/docker-compose.yml" << EOF
     restart: always
     ports:
-      - '0.0.0.0:443:443'
+      - "0.0.0.0:443:443"
     networks:
       - remnawave-network
 
@@ -279,20 +278,19 @@ networks:
     driver: bridge
     external: true
 EOF
-
+    
     docker compose up -d
-    ok "Nginx running on port 443 with SSL"
+    ok "Nginx running on port 443"
 }
 
 # ============================================================
-# Subscription Page
+# SUBSCRIPTION PAGE
 # ============================================================
 setup_subscription() {
     step "Setting up Subscription Page"
-
     mkdir -p "$SUB_DIR"
     cd "$SUB_DIR"
-
+    
     cat > "$SUB_DIR/docker-compose.yml" << EOF
 services:
   remnawave-subscription-page:
@@ -300,9 +298,9 @@ services:
     container_name: remnawave-subscription-page
     restart: always
     env_file:
-      - ${INSTALL_DIR}/.env
+      - ./.env
     ports:
-      - '127.0.0.1:3010:3010'
+      - "127.0.0.1:3010:3010"
     networks:
       - remnawave-network
 
@@ -312,194 +310,440 @@ networks:
     driver: bridge
     external: true
 EOF
-
+    
+    cat > "$SUB_DIR/.env" << EOF
+APP_PORT=3010
+REMNAWAVE_PANEL_URL=http://remnawave:3000
+REMNAWAVE_API_TOKEN=YOUR_API_TOKEN_HERE
+TRUST_PROXY=true
+CUSTOM_SUB_PREFIX=
+MARZBAN_LEGACY_LINK_ENABLED=false
+SUB_PUBLIC_DOMAIN=\${SUB_DOMAIN}
+EOF
+    
     docker compose up -d
     ok "Subscription Page running on port 3010"
+    warn "IMPORTANT: Edit $SUB_DIR/.env and set your REMNAWAVE_API_TOKEN"
 }
 
 # ============================================================
-# Save credentials
+# INSTALL NODE
+# ============================================================
+install_node() {
+    step "Installing Remnawave Node"
+    bash <(curl -Ls https://raw.githubusercontent.com/nerioff1337/remnawave-node-auto/refs/heads/main/install.sh)
+    ok "Node installation complete!"
+    read -rp "Press Enter to continue..."
+}
+
+# ============================================================
+# SETUP HYSTERIA2
+# ============================================================
+setup_hysteria2() {
+    step "Setting up Hysteria2"
+    read -rp "Node directory [/opt/remnanode]: " NODE_PATH
+    NODE_PATH=${NODE_PATH:-/opt/remnanode}
+    read -rp "Domain (e.g., node.example.com): " DOMAIN
+    
+    safe_apt_install certbot
+    
+    CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+    KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+    
+    if [[ ! -f "$CERT" || ! -f "$KEY" ]]; then
+        certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos \
+            --register-unsafely-without-email \
+            --deploy-hook "docker compose -f $NODE_PATH/docker-compose.yml restart remnanode"
+    fi
+    
+    COMPOSE="$NODE_PATH/docker-compose.yml"
+    cp "$COMPOSE" "${COMPOSE}.bak"
+    
+    sed -i -E 's|remnawave/node:[a-zA-Z0-9_.-]+|remnawave/node:latest|g' "$COMPOSE"
+    sed -i '/\/var\/lib\/remnawave\/configs\/xray\/ssl/d' "$COMPOSE"
+    
+    # Add SSL volumes
+    if grep -q "^\s*volumes:" "$COMPOSE"; then
+        VOL=$(grep -m 1 "^\s*volumes:" "$COMPOSE" | sed -E 's/^([[:space:]]*).*/\1/')
+        INDENT="${VOL}  "
+        sed -i "/^[[:space:]]*volumes:/a \\
+${INDENT}- $CERT:/var/lib/remnawave/configs/xray/ssl/cert.pem:ro\\
+${INDENT}- $KEY:/var/lib/remnawave/configs/xray/ssl/cert.key:ro" "$COMPOSE"
+    fi
+    
+    docker compose -f "$COMPOSE" pull
+    docker compose -f "$COMPOSE" down
+    docker compose -f "$COMPOSE" up -d
+    
+    ok "Hysteria2 setup complete!"
+    read -rp "Press Enter..."
+}
+
+# ============================================================
+# UPDATE XRAY CORE
+# ============================================================
+update_xray_core() {
+    step "Updating Xray Core"
+    read -rp "Custom Xray path [/opt/remnanode/custom-xray]: " CX_DIR
+    CX_DIR=${CX_DIR:-/opt/remnanode/custom-xray}
+    read -rp "Node path [/opt/remnanode]: " NODE_PATH
+    NODE_PATH=${NODE_PATH:-/opt/remnanode}
+    read -rp "Version [latest]: " VER
+    VER=${VER:-latest}
+    
+    safe_apt_install curl unzip
+    mkdir -p "$CX_DIR"
+    cd "$CX_DIR"
+    
+    if [[ "$VER" == "latest" ]]; then
+        VER=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+    
+    wget -qO Xray-linux-64.zip "https://github.com/XTLS/Xray-core/releases/download/${VER}/Xray-linux-64.zip"
+    unzip -o Xray-linux-64.zip >/dev/null
+    chmod +x xray
+    
+    COMPOSE="$NODE_PATH/docker-compose.yml"
+    if ! grep -q "$CX_DIR/xray:/usr/local/bin/xray:ro" "$COMPOSE"; then
+        cp "$COMPOSE" "${COMPOSE}.bak"
+        if grep -q "^\s*volumes:" "$COMPOSE"; then
+            VOL=$(grep -m 1 "^\s*volumes:" "$COMPOSE" | sed -E 's/^([[:space:]]*).*/\1/')
+            INDENT="${VOL}  "
+            sed -i "/^[[:space:]]*volumes:/a \\
+${INDENT}- $CX_DIR/xray:/usr/local/bin/xray:ro" "$COMPOSE"
+        fi
+        docker compose -f "$COMPOSE" down
+        docker compose -f "$COMPOSE" up -d
+    else
+        docker compose -f "$COMPOSE" restart remnanode
+    fi
+    
+    ok "Xray updated to $VER!"
+    read -rp "Press Enter..."
+}
+
+# ============================================================
+# RESTART NODE
+# ============================================================
+restart_node() {
+    step "Restarting Node"
+    read -rp "Node path [/opt/remnanode]: " NODE_PATH
+    NODE_PATH=${NODE_PATH:-/opt/remnanode}
+    docker compose -f "$NODE_PATH/docker-compose.yml" restart remnanode
+    ok "Node restarted!"
+    read -rp "Press Enter..."
+}
+
+# ============================================================
+# VIEW LOGS
+# ============================================================
+view_logs() {
+    step "Node Logs"
+    read -rp "Node path [/opt/remnanode]: " NODE_PATH
+    NODE_PATH=${NODE_PATH:-/opt/remnanode}
+    echo -e "${YELLOW}Press Ctrl+C to exit${CLR}"
+    docker compose -f "$NODE_PATH/docker-compose.yml" logs -f --tail 50 remnanode
+}
+
+# ============================================================
+# RENEW CERTS
+# ============================================================
+renew_certs() {
+    step "Renewing SSL Certificates"
+    certbot renew --force-renewal
+    ok "Certificates renewed!"
+    read -rp "Press Enter..."
+}
+
+# ============================================================
+# SWITCH BRANCH
+# ============================================================
+switch_branch() {
+    step "Switching Branch (stable/dev)"
+    echo -e "  ${YELLOW}1.${NC} Node"
+    echo -e "  ${YELLOW}2.${NC} Panel"
+    echo -e "  ${YELLOW}3.${NC} Custom path"
+    read -rp "Select (1-3): " choice
+    case $choice in
+        1) DEFAULT="/opt/remnanode" ;;
+        2) DEFAULT="/opt/remnawave" ;;
+        3) DEFAULT="" ;;
+        *) return ;;
+    esac
+    read -rp "Path [$DEFAULT]: " PATH_DIR
+    PATH_DIR=${PATH_DIR:-$DEFAULT}
+    COMPOSE="$PATH_DIR/docker-compose.yml"
+    
+    [[ ! -f "$COMPOSE" ]] && { err "File not found!"; read -rp "Press Enter..."; return; }
+    
+    echo -e "  ${YELLOW}1.${NC} DEV branch"
+    echo -e "  ${YELLOW}2.${NC} STABLE branch"
+    read -rp "Select (1-2): " branch
+    
+    cp "$COMPOSE" "${COMPOSE}.bak"
+    case $branch in
+        1)
+            sed -i -E 's|remnawave/node:[a-zA-Z0-9_.-]+|remnawave/node:dev|g' "$COMPOSE"
+            sed -i -E 's|remnawave/backend:[a-zA-Z0-9_.-]+|remnawave/backend:dev|g' "$COMPOSE"
+            ;;
+        2)
+            sed -i -E 's|remnawave/node:[a-zA-Z0-9_.-]+|remnawave/node:latest|g' "$COMPOSE"
+            sed -i -E 's|remnawave/backend:[a-zA-Z0-9_.-]+|remnawave/backend:2|g' "$COMPOSE"
+            ;;
+        *) return ;;
+    esac
+    
+    docker compose -f "$COMPOSE" pull
+    docker compose -f "$COMPOSE" down
+    docker compose -f "$COMPOSE" up -d
+    ok "Branch switched!"
+    read -rp "Press Enter..."
+}
+
+# ============================================================
+# MIGRATE PANEL (Backup/Restore)
+# ============================================================
+migrate_panel() {
+    while true; do
+        clear
+        header
+        echo -e "  ${YELLOW}1.${NC} Backup panel (export DB + configs)"
+        echo -e "  ${YELLOW}2.${NC} Restore panel (import to new server)"
+        echo -e "  ${YELLOW}0.${NC} Back"
+        read -rp "Select (0-2): " choice
+        case $choice in
+            1) backup_panel ;;
+            2) restore_panel ;;
+            0) break ;;
+        esac
+    done
+}
+
+backup_panel() {
+    step "Backing up Panel"
+    BACKUP_DIR="/opt/remnawave-backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+    
+    DB_PASS=$(grep POSTGRES_PASSWORD "$INSTALL_DIR/.env" | cut -d= -f2)
+    export PGPASSWORD=$DB_PASS
+    
+    pg_dump -h localhost -p 6767 -U postgres -d postgres --format=custom > "$BACKUP_DIR/db.dump"
+    ok "Database dumped"
+    
+    cp "$INSTALL_DIR/.env" "$BACKUP_DIR/"
+    cp "$INSTALL_DIR/docker-compose.yml" "$BACKUP_DIR/"
+    mkdir -p "$BACKUP_DIR/nginx"
+    cp "$NGINX_DIR"/*.pem "$NGINX_DIR"/*.conf "$BACKUP_DIR/nginx/" 2>/dev/null || true
+    
+    tar czf "${BACKUP_DIR}.tar.gz" -C "$(dirname "$BACKUP_DIR")" "$(basename "$BACKUP_DIR")"
+    ok "Backup created: ${BACKUP_DIR}.tar.gz"
+    echo -e "${YELLOW}Copy this file to your new server and run Restore.${CLR}"
+    read -rp "Press Enter..."
+}
+
+restore_panel() {
+    step "Restoring Panel from Backup"
+    
+    # Find backup files (support both naming formats)
+    echo -e "${CYAN}Scanning for backup files...${CLR}"
+    mapfile -t BACKUPS < <(find / -maxdepth 3 -name "remnawave_backup_*.tar.gz" -o -name "remnawave-backup-*.tar.gz" 2>/dev/null | sort -r)
+    
+    if [[ ${#BACKUPS[@]} -gt 0 ]]; then
+        echo -e "${GREEN}Found backups:${CLR}"
+        for i in "${!BACKUPS[@]}"; do
+            size=$(du -h "${BACKUPS[$i]}" 2>/dev/null | cut -f1)
+            echo -e "  ${YELLOW}$((i+1)).${CLR} ${BACKUPS[$i]} (${size})"
+        done
+        echo -e "  ${YELLOW}0.${CLR} Enter custom path"
+        read -rp "Select backup [0-${#BACKUPS[@]}]: " sel
+        
+        if [[ "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le ${#BACKUPS[@]} ]]; then
+            BACKUP_TGZ="${BACKUPS[$((sel-1))]}"
+        else
+            read -rp "Enter backup file path: " BACKUP_TGZ
+        fi
+    else
+        echo -e "${YELLOW}No backups found automatically.${CLR}"
+        read -rp "Enter backup file path (e.g., /root/remnawave_backup_2026-07-16_00_00_07.tar.gz): " BACKUP_TGZ
+    fi
+    
+    # Validate file
+    [[ -z "$BACKUP_TGZ" ]] && { err "No file specified!"; read -rp "Press Enter..."; return; }
+    [[ ! -f "$BACKUP_TGZ" ]] && { err "File not found: $BACKUP_TGZ"; read -rp "Press Enter..."; return; }
+    
+    ok "Selected: $BACKUP_TGZ"
+    
+    # Extract backup
+    BACKUP_DIR="/opt/remnawave-restore-tmp"
+    rm -rf "$BACKUP_DIR"
+    mkdir -p "$BACKUP_DIR"
+    
+    info "Extracting backup..."
+    tar xzf "$BACKUP_TGZ" -C "$BACKUP_DIR"
+    
+    # Detect structure (strip top-level directory if present)
+    if [[ $(ls -1 "$BACKUP_DIR" | wc -l) -eq 1 && -d "$BACKUP_DIR"/$(ls -1 "$BACKUP_DIR") ]]; then
+        SUBDIR=$(ls -1 "$BACKUP_DIR")
+        mv "$BACKUP_DIR/$SUBDIR"/* "$BACKUP_DIR/" 2>/dev/null || true
+        rmdir "$BACKUP_DIR/$SUBDIR" 2>/dev/null || true
+    fi
+    
+    # Verify required files
+    info "Verifying backup contents..."
+    [[ ! -f "$BACKUP_DIR/db.dump" ]] && { err "Missing db.dump in backup!"; rm -rf "$BACKUP_DIR"; read -rp "Press Enter..."; return; }
+    [[ ! -f "$BACKUP_DIR/.env" ]] && { err "Missing .env in backup!"; rm -rf "$BACKUP_DIR"; read -rp "Press Enter..."; return; }
+    [[ ! -f "$BACKUP_DIR/docker-compose.yml" ]] && { err "Missing docker-compose.yml in backup!"; rm -rf "$BACKUP_DIR"; read -rp "Press Enter..."; return; }
+    
+    ok "Backup verified (db.dump + .env + docker-compose.yml)"
+    
+    # Stop existing panel if running
+    if [[ -d "$INSTALL_DIR" ]]; then
+        warn "Existing panel found. Stopping..."
+        cd "$INSTALL_DIR"
+        docker compose down 2>/dev/null || true
+    fi
+    
+    # Install Docker if needed
+    install_docker
+    
+    # Setup directories
+    mkdir -p "$INSTALL_DIR" "$NGINX_DIR" "$SUB_DIR"
+    
+    # Copy files
+    cp "$BACKUP_DIR/.env" "$INSTALL_DIR/"
+    cp "$BACKUP_DIR/docker-compose.yml" "$INSTALL_DIR/"
+    cp "$BACKUP_DIR/nginx"/* "$NGINX_DIR/" 2>/dev/null || true
+    
+    # Copy subscription if exists
+    if [[ -d "$BACKUP_DIR/subscription" ]]; then
+        cp -r "$BACKUP_DIR/subscription"/* "$SUB_DIR/" 2>/dev/null || true
+        ok "Subscription config restored"
+    fi
+    
+    # Fix backend version
+    sed -i 's|remnawave/backend:latest|remnawave/backend:2.8.0|' "$INSTALL_DIR/docker-compose.yml"
+    
+    # Start DB only
+    cd "$INSTALL_DIR"
+    docker compose up -d remnawave-db
+    
+    info "Waiting for DB..."
+    for i in {1..30}; do
+        if docker exec remnawave-db pg_isready -U postgres &>/dev/null; then
+            ok "DB ready!"
+            break
+        fi
+        sleep 1
+    done
+    
+    # Restore database
+    DB_PASS=$(grep POSTGRES_PASSWORD "$INSTALL_DIR/.env" | cut -d= -f2)
+    export PGPASSWORD=$DB_PASS
+    docker exec -i remnawave-db pg_restore -U postgres -d postgres --clean --if-exists < "$BACKUP_DIR/db.dump"
+    ok "Database restored!"
+    
+    # Fix nginx IPs
+    cd "$NGINX_DIR"
+    sed -i 's|172\.18\.0\.[0-9]*:3000|remnawave:3000|g' nginx.conf 2>/dev/null || true
+    sed -i 's|172\.18\.0\.[0-9]*:3010|remnawave-subscription-page:3010|g' nginx.conf 2>/dev/null || true
+    
+    # Start all services
+    cd "$INSTALL_DIR"
+    docker compose up -d
+    cd "$NGINX_DIR"
+    docker compose up -d
+    
+    # Fix IPs
+    REMNAWAVE_IP=$(docker network inspect remnawave-network --format "{{range .Containers}}{{if eq .Name \"remnawave\"}}{{.IPv4Address}}{{end}}{{end}}" | cut -d/ -f1)
+    SUB_IP=$(docker network inspect remnawave-network --format "{{range .Containers}}{{if eq .Name \"remnawave-subscription-page\"}}{{.IPv4Address}}{{end}}{{end}}" | cut -d/ -f1)
+    sed -i "s|proxy_pass http://remnawave:3000;|proxy_pass http://$REMNAWAVE_IP:3000;|" nginx.conf
+    sed -i "s|proxy_pass http://remnawave-subscription-page:3010;|proxy_pass http://$SUB_IP:3010;|" nginx.conf
+    docker compose restart
+    
+    rm -rf "$BACKUP_DIR"
+    ok "Panel restored successfully!"
+    read -rp "Press Enter..."
+}
+
+# ============================================================
+# SAVE CREDENTIALS
 # ============================================================
 save_credentials() {
     cat > "$INSTALL_DIR/.credentials" << EOF
 ========================================
-  REMNAWAVE PANEL 2.8.0 CREDENTIALS
+  REMNAWAVE PANEL 2.8.0
 ========================================
-
 Panel URL:      https://${PANEL_DOMAIN}
 Subscription:   https://${SUB_DOMAIN}
 
---- Secrets (SAVE THESE!) ---
-APP_SECRET:            ${APP_SECRET}
-JWT_AUTH_SECRET:       ${JWT_AUTH_SECRET}
-JWT_API_TOKENS_SECRET: ${JWT_API_TOKENS_SECRET}
-METRICS_PASS:          ${METRICS_PASS}
-POSTGRES_PASSWORD:     ${POSTGRES_PASSWORD}
-WEBHOOK_SECRET:        ${WEBHOOK_SECRET}
+Directories:
+  Panel:    ${INSTALL_DIR}
+  Nginx:    ${NGINX_DIR}
+  Node:     ${NODE_DIR}
 
---- Directories ---
-Panel:          ${INSTALL_DIR}
-Nginx:          ${NGINX_DIR}
-Subscription:   ${SUB_DIR}
-
---- Useful Commands ---
-Logs:   cd ${INSTALL_DIR} && docker compose logs -f
-Stop:   cd ${INSTALL_DIR} && docker compose down
-Restart: cd ${INSTALL_DIR} && docker compose restart
-
+Commands:
+  Logs:   cd ${INSTALL_DIR} && docker compose logs -f
+  Stop:   cd ${INSTALL_DIR} && docker compose down
 ========================================
 EOF
     chmod 600 "$INSTALL_DIR/.credentials"
-    ok "Credentials saved to $INSTALL_DIR/.credentials"
 }
 
-# ============================================================
-# Summary
-# ============================================================
 show_summary() {
     echo ""
-    banner "╔══════════════════════════════════════════════════════════╗"
-    banner "║           INSTALLATION COMPLETE! ✓                      ║"
-    banner "╚══════════════════════════════════════════════════════════╝"
-    echo ""
-    echo -e "  ${BOLD}Panel URL:${CLR}      ${GREEN}https://${PANEL_DOMAIN}${CLR}"
-    echo -e "  ${BOLD}Subscription:${CLR}   ${GREEN}https://${SUB_DOMAIN}${CLR}"
-    echo ""
-    echo -e "  ${YELLOW}NEXT STEPS:${CLR}"
-    echo -e "  1. Open ${GREEN}https://${PANEL_DOMAIN}${CLR} in your browser"
-    echo -e "  2. Create superadmin account (first launch)"
-    echo -e "  3. Go to Settings → General → configure panel"
-    echo -e "  4. Add nodes in the Nodes section"
-    echo -e "  5. Create users with subscription links"
-    echo ""
-    echo -e "  ${CYAN}Credentials:${CLR}    cat ${INSTALL_DIR}/.credentials"
-    echo -e "  ${CYAN}Panel Logs:${CLR}     cd ${INSTALL_DIR} && docker compose logs -f"
-    echo -e "  ${CYAN}Nginx Logs:${CLR}     cd ${NGINX_DIR} && docker compose logs -f"
-    echo ""
-
-    # Show running containers
-    info "Running containers:"
-    docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "remnawave" || true
-    echo ""
+    echo -e "${GREEN}========================================${CLR}"
+    echo -e "${GREEN}  Remnawave Installed!${CLR}"
+    echo -e "${GREEN}========================================${CLR}"
+    echo -e "  ${BOLD}Panel:${CLR}      ${GREEN}https://${PANEL_DOMAIN}${CLR}"
+    echo -e "  ${BOLD}Sub:${CLR}        ${GREEN}https://${SUB_DOMAIN}${CLR}"
+    echo -e "\n  ${YELLOW}Next steps:${CLR}"
+    echo -e "  1. Open https://${PANEL_DOMAIN}"
+    echo -e "  2. Create superadmin account"
+    echo -e "  3. Add API token to ${SUB_DIR}/.env"
 }
 
 # ============================================================
-# Uninstall
-# ============================================================
-do_uninstall() {
-    header
-    step "Uninstalling Remnawave"
-    warn "This will remove all Remnawave containers and data!"
-    read -rp "Are you sure? Type 'yes' to confirm: " confirm
-    if [[ "$confirm" != "yes" ]]; then
-        info "Uninstall cancelled"
-        return
-    fi
-
-    cd "$INSTALL_DIR" 2>/dev/null && docker compose down -v 2>/dev/null || true
-    cd "$NGINX_DIR" 2>/dev/null && docker compose down -v 2>/dev/null || true
-    cd "$SUB_DIR" 2>/dev/null && docker compose down -v 2>/dev/null || true
-
-    rm -rf "$INSTALL_DIR"
-    ok "Remnawave uninstalled"
-}
-
-# ============================================================
-# Show logs
-# ============================================================
-show_logs() {
-    header
-    echo -e "${CYAN}1)${CLR} Panel logs"
-    echo -e "${CYAN}2)${CLR} Nginx logs"
-    echo -e "${CYAN}3)${CLR} Subscription logs"
-    echo -e "${CYAN}4)${CLR} All containers"
-    read -rp "Select: " choice
-    case $choice in
-        1) cd "$INSTALL_DIR" && docker compose logs -f ;;
-        2) cd "$NGINX_DIR" && docker compose logs -f ;;
-        3) cd "$SUB_DIR" && docker compose logs -f ;;
-        4) docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep remnawave ;;
-        *) info "Cancelled" ;;
-    esac
-}
-
-# ============================================================
-# Status check
-# ============================================================
-show_status() {
-    header
-    step "Container Status"
-    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | grep -E "(NAME|remnawave)" || warn "No Remnawave containers running"
-    echo ""
-    if [[ -f "$INSTALL_DIR/.credentials" ]]; then
-        step "Saved Configuration"
-        grep -E "(URL|DOMAIN)" "$INSTALL_DIR/.credentials" 2>/dev/null || true
-    fi
-}
-
-# ============================================================
-# Menu
+# MAIN MENU
 # ============================================================
 show_menu() {
-    header
-    echo -e "  ${CYAN}1)${CLR} ${BOLD}Install Remnawave 2.8.0${CLR}  — Full installation"
-    echo -e "  ${CYAN}2)${CLR} ${BOLD}Show Status${CLR}            — Running containers"
-    echo -e "  ${CYAN}3)${CLR} ${BOLD}View Logs${CLR}              — Container logs"
-    echo -e "  ${CYAN}4)${CLR} ${RED}${BOLD}Uninstall${CLR}              — Remove everything"
-    echo -e "  ${CYAN}0)${CLR} ${BOLD}Exit${CLR}"
-    echo ""
-    read -rp "Select option [0-4]: " choice
-    echo ""
-
-    case $choice in
-        1) do_install ;;
-        2) show_status; read -rp "Press Enter..."; show_menu ;;
-        3) show_logs ;;
-        4) do_uninstall; read -rp "Press Enter..."; show_menu ;;
-        0) info "Goodbye!"; exit 0 ;;
-        *) warn "Invalid option"; sleep 1; show_menu ;;
-    esac
+    while true; do
+        clear
+        header
+        echo -e "  ${CYAN}1.${CLR} ${BOLD}Install Panel${CLR}        - Full panel setup"
+        echo -e "  ${CYAN}2.${CLR} ${BOLD}Install Node${CLR}         - Install remnawave/node"
+        echo -e "  ${CYAN}3.${CLR} ${BOLD}Setup Hysteria2${CLR}      - Configure H2 on node"
+        echo -e "  ${CYAN}4.${CLR} ${BOLD}Update Xray Core${CLR}     - Custom Xray version"
+        echo -e "  ${CYAN}5.${CLR} ${BOLD}Restart Node${CLR}         - Restart remnanode"
+        echo -e "  ${CYAN}6.${CLR} ${BOLD}View Logs${CLR}            - Node logs"
+        echo -e "  ${CYAN}7.${CLR} ${BOLD}Renew SSL Certs${CLR}      - Force cert renewal"
+        echo -e "  ${CYAN}8.${CLR} ${BOLD}Switch Branch${CLR}        - stable/dev"
+        echo -e "  ${CYAN}9.${CLR} ${BOLD}Migrate Panel${CLR}        - Backup/Restore"
+        echo -e "  ${RED}0.${CLR} ${BOLD}Exit${CLR}"
+        echo ""
+        read -rp "Select [0-9]: " choice
+        
+        case $choice in
+            1) install_panel ;;
+            2) install_node ;;
+            3) setup_hysteria2 ;;
+            4) update_xray_core ;;
+            5) restart_node ;;
+            6) view_logs ;;
+            7) renew_certs ;;
+            8) switch_branch ;;
+            9) migrate_panel ;;
+            0) echo -e "${GREEN}Goodbye!${CLR}"; exit 0 ;;
+            *) warn "Invalid option"; sleep 1 ;;
+        esac
+    done
 }
 
-# ============================================================
-# Main install flow
-# ============================================================
-do_install() {
-    header
-    log_init
-    require_root
-
-    # Check if already installed
-    if [[ -d "$INSTALL_DIR" ]] && docker ps --format '{{.Names}}' | grep -q "remnawave"; then
-        warn "Remnawave appears to be already installed!"
-        read -rp "Continue and overwrite? [y/N]: " overwrite
-        [[ "$overwrite" =~ ^[Yy]$ ]] || { show_menu; return; }
-    fi
-
-    ask_domains
-    install_docker
-    generate_secrets
-    download_configs
-    configure_env
-    start_panel
-    setup_nginx
-    setup_subscription
-    save_credentials
-    show_summary
-}
-
-# ============================================================
-# Entrypoint
-# ============================================================
-# If called with arguments (non-interactive)
+# Non-interactive mode
 if [[ "${1:-}" == "install" ]]; then
     PANEL_DOMAIN="${2:-}"
     SUB_DOMAIN="${3:-}"
-    if [[ -z "$PANEL_DOMAIN" || -z "$SUB_DOMAIN" ]]; then
-        err "Usage: $0 install <panel_domain> <sub_domain>"
-        exit 1
-    fi
-    do_install
+    [[ -z "$PANEL_DOMAIN" || -z "$SUB_DOMAIN" ]] && { err "Usage: $0 install <panel_domain> <sub_domain>"; exit 1; }
+    install_panel
     exit 0
 fi
 
