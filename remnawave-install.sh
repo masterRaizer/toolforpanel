@@ -412,27 +412,125 @@ EOF
     echo -e "${YEL}Добавьте Hysteria2 инбаунд в панели (порт $H2_PORT)${R}"
 }
 
-# === 4. ОБНОВЛЕНИЕ XRAY ===
+# === 4. ОБНОВЛЕНИЕ XRAY / НОДЫ ===
 update_xray() {
-    step "Обновление Xray ядра"
+    echo ""
+    echo "1. Обновить ноду (docker compose pull)"
+    echo "2. Установить кастомное ядро Xray"
+    echo "3. Удалить кастомное ядро (использовать встроенное)"
+    echo "0. Назад"
+    read -rp "> " ux
+    
+    case $ux in
+        1) update_node_docker;;
+        2) install_custom_xray;;
+        3) remove_custom_xray;;
+        0) return;;
+    esac
+}
+
+update_node_docker() {
+    step "Обновление ноды"
     local NDIR=$(find_node_dir)
-    if [[ -z "$NDIR" ]]; then
-        err "Нода не найдена"
-        return
-    fi
+    [[ -z "$NDIR" ]] && { err "Нода не найдена"; return; }
     ok "Нода: $NDIR"
     
-    info "Перезапуск ноды (автоматически скачает последний Xray)..."
+    info "docker compose pull && up -d..."
     cd "$NDIR" && docker compose pull && docker compose up -d
     
     sleep 3
     if docker ps --format '{{.Names}}' | grep -q 'rw-node'; then
-        ok "Нода перезапущена с обновлённым Xray"
-        docker logs --tail 20 rw-node
+        ok "Нода обновлена"
+        docker logs --tail 15 rw-node
     else
         err "Нода не запустилась"
         docker logs --tail 30 rw-node 2>/dev/null || true
     fi
+}
+
+install_custom_xray() {
+    step "Установка кастомного ядра Xray"
+    local NDIR=$(find_node_dir)
+    [[ -z "$NDIR" ]] && { err "Нода не найдена"; return; }
+    ok "Нода: $NDIR"
+    
+    read -rp "Папка custom-xray [$NDIR/custom-xray]: " CXDIR
+    CXDIR=${CXDIR:-$NDIR/custom-xray}
+    
+    read -rp "Версия Xray (например 3.0.0, v25.3.31, или 'latest'): " XVER
+    [[ -z "$XVER" ]] && { err "Версия обязательна"; return; }
+    
+    # Установка зависимостей
+    apt-get install -y -qq curl unzip 2>/dev/null || true
+    
+    # Определение URL
+    local URL=""
+    if [[ "$XVER" == "latest" ]]; then
+        local LATEST=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        [[ -z "$LATEST" ]] && { err "Не удалось получить latest версию"; return; }
+        XVER="$LATEST"
+        ok "Latest версия: $XVER"
+    fi
+    
+    # Формат версии (добавляем v если нет)
+    [[ "$XVER" != v* ]] && URL="https://github.com/XTLS/Xray-core/releases/download/v${XVER}/Xray-linux-64.zip" || URL="https://github.com/XTLS/Xray-core/releases/download/${XVER}/Xray-linux-64.zip"
+    
+    mkdir -p "$CXDIR"
+    cd "$CXDIR"
+    
+    info "Скачивание Xray $XVER..."
+    rm -f xray Xray-linux-64.zip
+    
+    if ! curl -fsSL -o Xray-linux-64.zip "$URL"; then
+        err "Не удалось скачать: $URL"
+        # Пробуем без v префикса
+        URL="https://github.com/XTLS/Xray-core/releases/download/${XVER}/Xray-linux-64.zip"
+        info "Пробуем: $URL"
+        curl -fsSL -o Xray-linux-64.zip "$URL" || { err "Тоже не сработало"; return; }
+    fi
+    
+    unzip -o Xray-linux-64.zip xray 2>/dev/null || { err "Ошибка распаковки"; return; }
+    rm -f Xray-linux-64.zip
+    chmod +x xray
+    
+    ok "Xray $XVER установлен в $CXDIR/xray"
+    ls -la "$CXDIR/xray"
+    
+    # Добавляем volume в docker-compose если нет
+    if ! grep -q 'custom-xray' "$NDIR/docker-compose.yml"; then
+        info "Добавление volume custom-xray в docker-compose..."
+        sed -i "/certs:\/app\/cert:ro/a\      - $CXDIR:/app/custom-xray:ro" "$NDIR/docker-compose.yml"
+        ok "Volume добавлен"
+    fi
+    
+    # Перезапуск
+    info "Перезапуск ноды..."
+    cd "$NDIR" && docker compose restart
+    sleep 2
+    
+    if docker ps --format '{{.Names}}' | grep -q 'rw-node'; then
+        ok "Нода перезапущена с кастомным Xray $XVER"
+        docker logs --tail 10 rw-node
+    else
+        err "Нода не запустилась"
+    fi
+}
+
+remove_custom_xray() {
+    step "Удаление кастомного ядра Xray"
+    local NDIR=$(find_node_dir)
+    [[ -z "$NDIR" ]] && { err "Нода не найдена"; return; }
+    
+    read -rp "Удалить $NDIR/custom-xray/xray? [y/N]: " ans
+    [[ ! "$ans" =~ ^[Yy]$ ]] && return
+    
+    rm -f "$NDIR/custom-xray/xray"
+    
+    # Удаляем volume из docker-compose
+    sed -i '/custom-xray/d' "$NDIR/docker-compose.yml"
+    
+    cd "$NDIR" && docker compose restart
+    ok "Кастомное ядро удалено. Нода использует встроенный Xray."
 }
 
 # === 5. ПЕРЕЗАПУСК НОДЫ ===
@@ -768,7 +866,7 @@ while true; do
     echo " 1. Установить панель"
     echo " 2. Установить ноду"
     echo " 3. Настроить Hysteria2 (SSL + H2)"
-    echo " 4. Обновить Xray / ноду"
+    echo " 4. Обновить Xray ядро / ноду"
     echo " 5. Перезапустить ноду"
     echo " 6. Логи (панель/нода/nginx)"
     echo " 7. Обновить SSL (acme.sh)"
