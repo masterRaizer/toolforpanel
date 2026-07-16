@@ -656,9 +656,13 @@ switch_branch() {
             ok "Переключено на stable: panel=$PV node=$NV"
             ;;
         2)
-            [[ -n "$PDIR" ]] && { sed -i 's|remnawave/backend:.*|remnawave/backend:dev|' "$PDIR/docker-compose.yml"; cd "$PDIR" && docker compose up -d; }
+            [[ -n "$PDIR" ]] && {
+                sed -i 's|remnawave/backend:.*|remnawave/backend:dev|' "$PDIR/docker-compose.yml"
+                grep -q 'I_UNDERSTAND_REST_API_BREAKING_CHANGES' "$PDIR/.env" || echo 'I_UNDERSTAND_REST_API_BREAKING_CHANGES=true' >> "$PDIR/.env"
+                cd "$PDIR" && docker compose up -d
+            }
             [[ -n "$NDIR" ]] && { sed -i 's|remnawave/node:.*|remnawave/node:dev|' "$NDIR/docker-compose.yml"; cd "$NDIR" && docker compose up -d; }
-            ok "Переключено на dev"
+            ok "Переключено на dev (3.0.0 — требуется I_UNDERSTAND_REST_API_BREAKING_CHANGES)"
             ;;
         3)
             read -rp "Версия панели (например 2.8.0): " PV
